@@ -1,0 +1,39 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+res_partner_export.csv
+config.json
+.env
+.coverage
+*.log
+
+# Data and exports
+*.csv
+*.xlsx
+*.env
+
+# IDE and tools
+.vscode/
+.idea/
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Local workspace files
+[A-Z]*.md
+!README.md
+!CHANGELOG.md
+!CONTRIBUTING.md
+!SKILL.md
+!LICENSE
+
+# Local docs
+docs/plans/
+docs/specs/
+docs/superpowers/
+docs/*.md
+!docs/README.md

@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openclaw-odoo"
+version = "1.0.0"
+description = "AI-powered Odoo 19 connector for OpenClaw, MCP, and CLI"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "openclaw-odoo contributors"}]
+requires-python = ">=3.10"
+keywords = ["odoo", "erp", "openclaw", "ai", "mcp", "automation", "telegram", "odoo19"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "requests>=2.31.0",
+]
+
+[project.optional-dependencies]
+mcp = ["fastmcp>=2.12.0"]
+excel = ["openpyxl>=3.1.0"]
+all = ["openclaw-odoo[mcp,excel]"]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.21", "openclaw-odoo[all]"]
+
+[project.scripts]
+openclaw-odoo = "openclaw_odoo.interfaces.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/parth-unjiya/openclaw-odoo"
+Repository = "https://github.com/parth-unjiya/openclaw-odoo"
+Issues = "https://github.com/parth-unjiya/openclaw-odoo/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
