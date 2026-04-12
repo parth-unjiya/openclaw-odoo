@@ -37,3 +37,9 @@ docs/specs/
 docs/superpowers/
 docs/*.md
 !docs/README.md
+
+# Environment-specific config (credentials, localhost URLs)
+.mcp.json
+docker-compose.yml
+odoo.conf
+openclaw-odoo.json

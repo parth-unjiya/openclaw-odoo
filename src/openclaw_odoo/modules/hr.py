@@ -165,7 +165,11 @@ def request_leave(client: OdooClient, employee_id: int, leave_type_id: int,
     Returns:
         Dict with 'id' and 'web_url' of the created leave request.
     """
-    # Odoo 19 requires datetime, not date — auto-append time if missing
+    # Odoo 19 requires both date-only fields (request_date_from/to) and
+    # datetime fields (date_from/to).  Extract date portions before appending
+    # time components so Odoo doesn't silently normalise to today.
+    request_date_from = date_from[:10]
+    request_date_to = date_to[:10]
     if len(date_from) <= 10:
         date_from = f"{date_from} 08:00:00"
     if len(date_to) <= 10:
@@ -173,6 +177,8 @@ def request_leave(client: OdooClient, employee_id: int, leave_type_id: int,
     vals = {
         "employee_id": employee_id,
         "holiday_status_id": leave_type_id,
+        "request_date_from": request_date_from,
+        "request_date_to": request_date_to,
         "date_from": date_from,
         "date_to": date_to,
     }

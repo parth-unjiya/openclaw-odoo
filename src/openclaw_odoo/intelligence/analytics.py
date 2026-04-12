@@ -164,12 +164,12 @@ class SalesAnalytics:
     def __init__(self, client: OdooClient):
         self.client = client
 
-    def dashboard(self) -> dict:
+    def dashboard(self, months: int = 6, top_products_limit: int = 10, **kwargs) -> dict:
         """Return combined sales summary, trend, and top products."""
         return {
             "summary": sales.analyze_sales(self.client),
-            "trend": sales.get_sales_trend(self.client),
-            "top_products": sales.get_top_products(self.client),
+            "trend": sales.get_sales_trend(self.client, months=months),
+            "top_products": sales.get_top_products(self.client, limit=top_products_limit),
         }
 
     def compare_periods(
@@ -270,8 +270,15 @@ class HRAnalytics:
 
     def dashboard(self) -> dict:
         """Return combined headcount, attendance, and leave data."""
+        from datetime import date, timedelta
         headcount = hr.get_headcount_summary(self.client)
-        attendance_records = hr.get_attendance(self.client)
+        today = date.today()
+        tomorrow = today + timedelta(days=1)
+        attendance_records = hr.get_attendance(
+            self.client,
+            date_from=today.isoformat(),
+            date_to=tomorrow.isoformat(),
+        )
         leave_records = hr.get_leaves(self.client)
         return {
             "headcount": headcount,

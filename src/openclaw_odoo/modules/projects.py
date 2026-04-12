@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from ..client import OdooClient
-from ..errors import OdooRecordNotFoundError, OdooAccessError
+from ..errors import OdooClawError, OdooRecordNotFoundError, OdooAccessError
 
 
 def create_project(client: OdooClient, name: str, **extra) -> dict:
@@ -198,7 +198,7 @@ def create_ticket(client: OdooClient, name: str, project_id: Optional[int] = Non
     try:
         record_id = client.create("helpdesk.ticket", vals)
         return {"id": record_id, "web_url": client.web_url("helpdesk.ticket", record_id)}
-    except OdooAccessError:
+    except OdooClawError:
         # Helpdesk module not available -- fall back to project.task with tag
         task_vals: dict[str, Any] = {"name": name}
         if project_id is not None:

@@ -1,9 +1,11 @@
 {
+  "protocol": "auto",
   "odoo": {
     "url": "http://localhost:8069",
     "db": "your_database_name",
     "user": "your_username",
-    "password": "your_password"
+    "password": "your_password",
+    "api_key": ""
   },
   "limits": {
     "default": 50,

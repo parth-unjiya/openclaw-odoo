@@ -211,6 +211,7 @@ class TestSmartCreateQuotation:
         client.search_read.side_effect = [
             [],  # partner exact - not found
             [],  # partner ilike - not found
+            [],  # partner word-level - not found (fuzzy fallback)
             [{"id": 5, "name": "Widget", "list_price": 25.0}],  # product
         ]
         client.create.side_effect = [88, 42]  # partner create, then order create
@@ -291,6 +292,7 @@ class TestSmartCreateTask:
         client.search_read.side_effect = [
             [],  # project exact - not found
             [],  # project ilike - not found
+            [],  # project word-level - not found (fuzzy fallback)
         ]
         client.create.side_effect = [15, 88]  # project create, then task create
         result = handler.smart_create_task(

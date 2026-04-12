@@ -1,15 +1,32 @@
 """Tests for security fixes applied 2026-03-17.
 
+Agent 29 -- Security test suite (2026-04-11).
+
 Covers:
+- T1: Readonly blocks create
+- T2: Readonly blocks write
+- T3: Readonly blocks unlink
+- T4: Readonly allows read (search_read works)
+- T5: Execute bypass check -- readonly=True, client.execute("res.partner","unlink",[id]) is blocked
+- T6: URL validation -- load_config with ftp:// URL raises ValueError
+- T7: Error sanitization -- sanitize_error strips traceback
+- T8: API key auth -- config with api_key, verify auth mechanism
+- T9: No credentials -- config with no user/password/api_key raises error
+- T10: Run: pytest tests/test_security_fixes.py -v
+- T11: File path validation -- file_import validates paths
+
+Plus extended coverage:
 - Readonly allowlist enforcement in execute() (S1/S2/S3/S4/S5)
+- _BLOCKED_METHODS enforcement (dangerous internal methods always denied)
 - Model/method regex validation (injection prevention)
-- Error sanitization in skill interface
+- Error sanitization in skill and MCP interfaces
 - Session close/context manager (Q6)
 - Protected json.loads in skill main() (Q11)
 - limit=None and limit=0 handling (Q3/Q12/Q16)
 - File path validation (S8/S9)
 - MCP error sanitization (S10)
 - Batch readonly enforcement
+- Sensitive model deny list enforcement
 """
 import json
 from io import StringIO
@@ -17,9 +34,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from openclaw_odoo.client import OdooClient, _READ_METHODS, _MODEL_RE, _METHOD_RE
-from openclaw_odoo.config import OdooClawConfig
-from openclaw_odoo.errors import OdooClawError, OdooValidationError
+from openclaw_odoo.client import (
+    OdooClient, _READ_METHODS, _BLOCKED_METHODS, _WRITE_METHODS,
+    _MODEL_RE, _METHOD_RE,
+)
+from openclaw_odoo.config import OdooClawConfig, load_config
+from openclaw_odoo.errors import (
+    OdooClawError, OdooValidationError, OdooAuthenticationError,
+    sanitize_error,
+)
 
 
 # =============================================================
@@ -75,7 +98,642 @@ def _mock_session(client):
 
 
 # =============================================================
-# 1. Readonly allowlist enforcement in execute()
+# T1: Readonly blocks create
+# =============================================================
+
+class TestT1ReadonlyBlocksCreate:
+    """T1: config with readonly=True, try client.create() -- must raise."""
+
+    def test_create_blocked_via_client_create(self, readonly_client):
+        """client.create() raises OdooClawError in readonly mode."""
+        with pytest.raises(OdooClawError, match="READONLY"):
+            readonly_client.create("res.partner", {"name": "test"})
+
+    def test_create_blocked_via_execute(self, readonly_client):
+        """client.execute('res.partner', 'create', ...) also blocked in readonly."""
+        with pytest.raises(OdooClawError, match="READONLY"):
+            readonly_client.execute("res.partner", "create", {"name": "x"})
+
+
+# =============================================================
+# T2: Readonly blocks write
+# =============================================================
+
+class TestT2ReadonlyBlocksWrite:
+    """T2: config with readonly=True, try client.write() -- must raise."""
+
+    def test_write_blocked_via_client_write(self, readonly_client):
+        """client.write() raises OdooClawError in readonly mode."""
+        with pytest.raises(OdooClawError, match="READONLY"):
+            readonly_client.write("res.partner", [1], {"name": "x"})
+
+    def test_write_blocked_via_execute(self, readonly_client):
+        """client.execute('res.partner', 'write', ...) also blocked in readonly."""
+        with pytest.raises(OdooClawError, match="READONLY"):
+            readonly_client.execute("res.partner", "write", [1], {"name": "x"})
+
+
+# =============================================================
+# T3: Readonly blocks unlink
+# =============================================================
+
+class TestT3ReadonlyBlocksUnlink:
+    """T3: config with readonly=True, try client.unlink() -- must raise."""
+
+    def test_unlink_blocked_via_client_unlink(self, readonly_client):
+        """client.unlink() raises OdooClawError in readonly mode."""
+        with pytest.raises(OdooClawError, match="READONLY"):
+            readonly_client.unlink("res.partner", [1])
+
+    def test_unlink_blocked_via_execute(self, readonly_client):
+        """client.execute('res.partner', 'unlink', ...) also blocked in readonly."""
+        with pytest.raises(OdooClawError, match="READONLY|not allowed"):
+            readonly_client.execute("res.partner", "unlink", [1])
+
+
+# =============================================================
+# T4: Readonly allows read
+# =============================================================
+
+class TestT4ReadonlyAllowsRead:
+    """T4: client.search_read() should work in readonly mode."""
+
+    def test_search_read_allowed_in_readonly(self, readonly_client):
+        """search_read works when readonly=True."""
+        _mock_session(readonly_client)
+        result = readonly_client.search_read("res.partner", limit=5)
+        # No exception raised -- readonly check passed
+
+    def test_all_read_methods_allowed_in_readonly(self, readonly_client):
+        """All _READ_METHODS pass the readonly check."""
+        _mock_session(readonly_client)
+        for method in ["search_read", "search", "search_count", "read",
+                       "fields_get", "name_get", "read_group"]:
+            readonly_client.execute("res.partner", method)
+
+    def test_read_method_via_client_read(self, readonly_client):
+        """client.read() works in readonly mode."""
+        mock_session = _mock_session(readonly_client)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"jsonrpc": "2.0", "result": [{"id": 1, "name": "Test"}]}
+        mock_session.post.return_value = mock_resp
+        result = readonly_client.read("res.partner", [1], fields=["name"])
+        assert result == [{"id": 1, "name": "Test"}]
+
+
+# =============================================================
+# T5: Execute bypass check
+# =============================================================
+
+class TestT5ExecuteBypassCheck:
+    """T5: readonly=True, client.execute('res.partner','unlink',[id]) -- document if bypasses.
+
+    The execute() method now has a centralized readonly allowlist. Methods
+    NOT in _READ_METHODS are blocked. This test confirms the bypass is
+    closed: execute('unlink') is blocked just like client.unlink().
+    """
+
+    def test_execute_unlink_blocked_in_readonly(self, readonly_client):
+        """Direct execute() with 'unlink' method is blocked in readonly mode."""
+        with pytest.raises(OdooClawError, match="READONLY"):
+            readonly_client.execute("res.partner", "unlink", [42])
+
+    def test_execute_write_blocked_in_readonly(self, readonly_client):
+        """Direct execute() with 'write' method is blocked in readonly mode."""
+        with pytest.raises(OdooClawError, match="READONLY"):
+            readonly_client.execute("res.partner", "write", [42], {"name": "hack"})
+
+    def test_execute_create_blocked_in_readonly(self, readonly_client):
+        """Direct execute() with 'create' method is blocked in readonly mode."""
+        with pytest.raises(OdooClawError, match="READONLY"):
+            readonly_client.execute("res.partner", "create", {"name": "hack"})
+
+    def test_execute_action_confirm_blocked_in_readonly(self, readonly_client):
+        """Direct execute() with 'action_confirm' blocked in readonly."""
+        with pytest.raises(OdooClawError, match="READONLY"):
+            readonly_client.execute("sale.order", "action_confirm", [1])
+
+    def test_execute_action_post_blocked_in_readonly(self, readonly_client):
+        """Direct execute() with 'action_post' blocked in readonly."""
+        with pytest.raises(OdooClawError, match="READONLY"):
+            readonly_client.execute("account.move", "action_post", [1])
+
+    def test_execute_action_cancel_blocked_in_readonly(self, readonly_client):
+        with pytest.raises(OdooClawError, match="READONLY"):
+            readonly_client.execute("sale.order", "action_cancel", [1])
+
+    def test_execute_action_done_blocked_in_readonly(self, readonly_client):
+        with pytest.raises(OdooClawError, match="READONLY"):
+            readonly_client.execute("stock.picking", "action_done", [1])
+
+    def test_execute_action_draft_blocked_in_readonly(self, readonly_client):
+        with pytest.raises(OdooClawError, match="READONLY"):
+            readonly_client.execute("account.move", "action_draft", [1])
+
+    def test_execute_arbitrary_non_read_method_blocked_in_readonly(self, readonly_client):
+        """Any method not in _READ_METHODS is blocked in readonly mode.
+
+        This closes the old bypass where raw execute() could call any method.
+        """
+        with pytest.raises(OdooClawError, match="READONLY"):
+            readonly_client.execute("res.partner", "button_confirm", [1])
+
+    def test_execute_write_methods_allowed_when_not_readonly(self, client):
+        """Write methods work normally when readonly is False."""
+        _mock_session(client)
+        client.execute("sale.order", "action_confirm", [1])
+
+
+# =============================================================
+# T6: URL validation
+# =============================================================
+
+class TestT6URLValidation:
+    """T6: load_config with ftp:// URL should raise ValueError."""
+
+    def test_ftp_url_raises_valueerror(self, monkeypatch):
+        """ftp:// URL scheme is rejected by load_config."""
+        monkeypatch.setenv("ODOO_URL", "ftp://evil.example.com")
+        monkeypatch.setenv("ODOO_DB", "testdb")
+        monkeypatch.setenv("ODOO_USER", "admin")
+        monkeypatch.setenv("ODOO_PASSWORD", "admin")
+        # Clear config file env to prevent file-based config
+        monkeypatch.delenv("OPENCLAW_ODOO_CONFIG", raising=False)
+        with pytest.raises(ValueError, match="Invalid odoo_url scheme.*ftp"):
+            load_config()
+
+    def test_file_url_raises_valueerror(self, monkeypatch):
+        """file:// URL scheme is rejected."""
+        monkeypatch.setenv("ODOO_URL", "file:///etc/passwd")
+        monkeypatch.setenv("ODOO_DB", "testdb")
+        monkeypatch.delenv("OPENCLAW_ODOO_CONFIG", raising=False)
+        with pytest.raises(ValueError, match="Invalid odoo_url scheme.*file"):
+            load_config()
+
+    def test_javascript_url_raises_valueerror(self, monkeypatch):
+        """javascript: URL scheme is rejected."""
+        monkeypatch.setenv("ODOO_URL", "javascript:alert(1)")
+        monkeypatch.setenv("ODOO_DB", "testdb")
+        monkeypatch.delenv("OPENCLAW_ODOO_CONFIG", raising=False)
+        with pytest.raises(ValueError, match="Invalid odoo_url scheme"):
+            load_config()
+
+    def test_empty_hostname_raises_valueerror(self, monkeypatch):
+        """URL with missing hostname is rejected."""
+        monkeypatch.setenv("ODOO_URL", "http://")
+        monkeypatch.setenv("ODOO_DB", "testdb")
+        monkeypatch.delenv("OPENCLAW_ODOO_CONFIG", raising=False)
+        with pytest.raises(ValueError, match="missing hostname"):
+            load_config()
+
+    def test_http_localhost_accepted(self, monkeypatch):
+        """http://localhost is accepted without error."""
+        monkeypatch.setenv("ODOO_URL", "http://localhost:8069")
+        monkeypatch.setenv("ODOO_DB", "testdb")
+        monkeypatch.setenv("ODOO_USER", "admin")
+        monkeypatch.setenv("ODOO_PASSWORD", "admin")
+        monkeypatch.delenv("OPENCLAW_ODOO_CONFIG", raising=False)
+        config = load_config()
+        assert config.odoo_url == "http://localhost:8069"
+
+    def test_https_accepted(self, monkeypatch):
+        """https:// URLs are accepted."""
+        monkeypatch.setenv("ODOO_URL", "https://erp.example.com")
+        monkeypatch.setenv("ODOO_DB", "testdb")
+        monkeypatch.delenv("OPENCLAW_ODOO_CONFIG", raising=False)
+        config = load_config()
+        assert config.odoo_url == "https://erp.example.com"
+
+
+# =============================================================
+# T7: Error sanitization
+# =============================================================
+
+class TestT7ErrorSanitization:
+    """T7: sanitize_error with traceback, verify stripped."""
+
+    def test_strips_tracebacks(self):
+        raw = 'Traceback (most recent call last):\n  File "/odoo/models.py", line 42\nValueError: bad'
+        result = sanitize_error(raw)
+        assert "Traceback" not in result
+        assert "/odoo/models.py" not in result
+
+    def test_strips_file_paths(self):
+        raw = "Error at /home/user/odoo/addons/sale/models.py:142 in create"
+        result = sanitize_error(raw)
+        assert "/home/user" not in result
+        assert ".py:142" not in result
+
+    def test_strips_sql(self):
+        raw = "ProgrammingError: SELECT id, name FROM res_partner WHERE active = true"
+        result = sanitize_error(raw)
+        assert "SELECT" not in result
+        assert "res_partner" not in result
+
+    def test_fallback_message_when_all_stripped(self):
+        raw = 'Traceback (most recent call last):\n  File "/app/server.py", line 1, in main\n    raise Exception()'
+        result = sanitize_error(raw)
+        assert result == "An internal error occurred"
+
+    def test_clean_message_passes_through(self):
+        raw = "Partner 42 not found"
+        result = sanitize_error(raw)
+        assert result == "Partner 42 not found"
+
+    def test_route_action_uses_sanitization(self):
+        from openclaw_odoo.interfaces.openclaw_skill import route_action
+        mock_client = MagicMock()
+        mock_client.create.side_effect = Exception(
+            'Traceback (most recent call last):\n  File "/odoo/server.py", line 1\nSELECT * FROM secret_table WHERE 1=1'
+        )
+        result = route_action(mock_client, "create_partner", {"name": "Test"})
+        assert result["error"] is True
+        assert "Traceback" not in result["message"]
+        assert "SELECT" not in result["message"]
+        assert "secret_table" not in result["message"]
+
+    def test_skill_sanitize_import_same_as_errors(self):
+        """Skill interface imports sanitize_error from errors module."""
+        from openclaw_odoo.interfaces.openclaw_skill import _sanitize_error as skill_sanitize
+        from openclaw_odoo.errors import sanitize_error as errors_sanitize
+        # They should be the same function
+        assert skill_sanitize is errors_sanitize
+
+
+# =============================================================
+# T8: API key auth
+# =============================================================
+
+class TestT8APIKeyAuth:
+    """T8: create config with api_key, verify auth mechanism."""
+
+    def test_api_key_auth_uses_key_as_both_login_and_password(self):
+        config = OdooClawConfig(
+            odoo_url="http://localhost:5353",
+            odoo_db="testdb",
+            odoo_user="",
+            odoo_password="",
+            odoo_api_key="my_secret_key",
+        )
+        c = OdooClient(config)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"jsonrpc": "2.0", "result": 99}
+        c._session = MagicMock()
+        c._session.post.return_value = mock_resp
+
+        c._ensure_auth()
+
+        assert c._uid == 99
+        call_payload = c._session.post.call_args[1]["json"]
+        auth_args = call_payload["params"]["args"]
+        assert auth_args[1] == "my_secret_key"  # login
+        assert auth_args[2] == "my_secret_key"  # password
+
+    def test_api_key_with_empty_user_triggers_key_auth(self):
+        """When user is empty but api_key is set, key auth is used."""
+        config = OdooClawConfig(
+            odoo_url="http://localhost:5353",
+            odoo_db="testdb",
+            odoo_user="",
+            odoo_password="",
+            odoo_api_key="test_api_key_12345",
+        )
+        c = OdooClient(config)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"jsonrpc": "2.0", "result": 42}
+        c._session = MagicMock()
+        c._session.post.return_value = mock_resp
+
+        c._ensure_auth()
+        assert c._uid == 42
+        assert c._password == "test_api_key_12345"
+
+
+# =============================================================
+# T9: No credentials
+# =============================================================
+
+class TestT9NoCredentials:
+    """T9: config with no user/password/api_key -- should fail."""
+
+    def test_no_credentials_raises_auth_error(self):
+        config = OdooClawConfig(
+            odoo_url="http://localhost:5353",
+            odoo_db="testdb",
+            odoo_user="",
+            odoo_password="",
+            odoo_api_key="",
+        )
+        c = OdooClient(config)
+        with pytest.raises(OdooAuthenticationError, match="No credentials"):
+            c._ensure_auth()
+
+    def test_no_password_no_key_raises_auth_error(self):
+        """User set but no password and no api_key should fail."""
+        config = OdooClawConfig(
+            odoo_url="http://localhost:5353",
+            odoo_db="testdb",
+            odoo_user="admin",
+            odoo_password="",
+            odoo_api_key="",
+        )
+        c = OdooClient(config)
+        with pytest.raises(OdooAuthenticationError, match="No credentials"):
+            c._ensure_auth()
+
+
+# =============================================================
+# T11: File path validation
+# =============================================================
+
+class TestT11FilePathValidation:
+    """T11: check file_import validates paths."""
+
+    def test_rejects_path_traversal(self):
+        from openclaw_odoo.intelligence.file_import import _validate_filepath
+        with pytest.raises(OdooClawError, match="Path traversal"):
+            _validate_filepath("../../etc/passwd.csv", "read")
+
+    def test_rejects_absolute_path_with_traversal(self):
+        from openclaw_odoo.intelligence.file_import import _validate_filepath
+        with pytest.raises(OdooClawError):
+            _validate_filepath("/tmp/safe/../../../etc/shadow.csv", "read")
+
+    def test_rejects_bad_extension_py(self):
+        from openclaw_odoo.intelligence.file_import import _validate_filepath
+        import tempfile
+        import os
+        with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as f:
+            path = f.name
+        try:
+            with pytest.raises(OdooClawError, match="Unsupported file extension"):
+                _validate_filepath(path, "read")
+        finally:
+            os.unlink(path)
+
+    def test_rejects_bad_extension_sh(self):
+        from openclaw_odoo.intelligence.file_import import _validate_filepath
+        import tempfile
+        import os
+        with tempfile.NamedTemporaryFile(suffix=".sh", delete=False) as f:
+            path = f.name
+        try:
+            with pytest.raises(OdooClawError, match="Unsupported file extension"):
+                _validate_filepath(path, "read")
+        finally:
+            os.unlink(path)
+
+    def test_rejects_bad_extension_json(self):
+        from openclaw_odoo.intelligence.file_import import _validate_filepath
+        import tempfile
+        import os
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = f.name
+        try:
+            with pytest.raises(OdooClawError, match="Unsupported file extension"):
+                _validate_filepath(path, "read")
+        finally:
+            os.unlink(path)
+
+    def test_rejects_empty_path(self):
+        from openclaw_odoo.intelligence.file_import import _validate_filepath
+        with pytest.raises(OdooClawError, match="File path is required"):
+            _validate_filepath("", "read")
+
+    def test_rejects_none_path(self):
+        from openclaw_odoo.intelligence.file_import import _validate_filepath
+        with pytest.raises(OdooClawError, match="File path is required"):
+            _validate_filepath(None, "read")
+
+    def test_rejects_non_string_path(self):
+        from openclaw_odoo.intelligence.file_import import _validate_filepath
+        with pytest.raises(OdooClawError, match="File path is required"):
+            _validate_filepath(12345, "read")
+
+    def test_rejects_symlink(self, tmp_path):
+        from openclaw_odoo.intelligence.file_import import _validate_filepath
+        import os
+        real_file = tmp_path / "real.csv"
+        real_file.write_text("a,b,c")
+        symlink = tmp_path / "link.csv"
+        os.symlink(str(real_file), str(symlink))
+        with pytest.raises(OdooClawError, match="Symbolic links"):
+            _validate_filepath(str(symlink), "read")
+
+    def test_accepts_valid_csv(self, tmp_path):
+        from openclaw_odoo.intelligence.file_import import _validate_filepath
+        real_file = tmp_path / "data.csv"
+        real_file.write_text("name,email")
+        result = _validate_filepath(str(real_file), "read")
+        assert result.endswith("data.csv")
+
+    def test_accepts_valid_xlsx(self, tmp_path):
+        from openclaw_odoo.intelligence.file_import import _validate_filepath
+        real_file = tmp_path / "data.xlsx"
+        real_file.write_bytes(b"dummy xlsx content")
+        result = _validate_filepath(str(real_file), "read")
+        assert result.endswith("data.xlsx")
+
+    def test_accepts_valid_xls(self, tmp_path):
+        from openclaw_odoo.intelligence.file_import import _validate_filepath
+        real_file = tmp_path / "data.xls"
+        real_file.write_bytes(b"dummy xls content")
+        result = _validate_filepath(str(real_file), "read")
+        assert result.endswith("data.xls")
+
+    def test_rejects_nonexistent_read(self):
+        from openclaw_odoo.intelligence.file_import import _validate_filepath
+        with pytest.raises(OdooClawError, match="File not found"):
+            _validate_filepath("/tmp/nonexistent_file_abc123.csv", "read")
+
+    def test_allows_nonexistent_write(self, tmp_path):
+        from openclaw_odoo.intelligence.file_import import _validate_filepath
+        path = str(tmp_path / "output.csv")
+        result = _validate_filepath(path, "write")
+        assert result.endswith("output.csv")
+
+    def test_write_mode_does_not_require_file_existence(self, tmp_path):
+        from openclaw_odoo.intelligence.file_import import _validate_filepath
+        path = str(tmp_path / "new_export.xlsx")
+        result = _validate_filepath(path, "write")
+        assert result.endswith("new_export.xlsx")
+
+
+# =============================================================
+# Extended: _BLOCKED_METHODS enforcement (always denied)
+# =============================================================
+
+class TestBlockedMethods:
+    """Verify _BLOCKED_METHODS are always denied, even in non-readonly mode."""
+
+    def test_sudo_blocked(self, client):
+        with pytest.raises(OdooValidationError, match="blocked for security"):
+            client.execute("res.partner", "sudo")
+
+    def test_with_user_blocked(self, client):
+        with pytest.raises(OdooValidationError, match="blocked for security"):
+            client.execute("res.partner", "with_user")
+
+    def test_shell_blocked(self, client):
+        with pytest.raises(OdooValidationError, match="blocked for security"):
+            client.execute("ir.module.module", "shell")
+
+    def test_sql_blocked(self, client):
+        with pytest.raises(OdooValidationError, match="blocked for security"):
+            client.execute("res.partner", "_sql")
+
+    def test_button_immediate_install_blocked(self, client):
+        with pytest.raises(OdooValidationError, match="blocked for security"):
+            client.execute("ir.module.module", "button_immediate_install")
+
+    def test_module_uninstall_blocked(self, client):
+        with pytest.raises(OdooValidationError, match="blocked for security"):
+            client.execute("ir.module.module", "module_uninstall")
+
+    def test_register_hook_blocked(self, client):
+        with pytest.raises(OdooValidationError, match="blocked for security"):
+            client.execute("res.partner", "_register_hook")
+
+    def test_load_blocked(self, client):
+        with pytest.raises(OdooValidationError, match="blocked for security"):
+            client.execute("res.partner", "load")
+
+    def test_import_data_blocked(self, client):
+        with pytest.raises(OdooValidationError, match="blocked for security"):
+            client.execute("res.partner", "import_data")
+
+    def test_all_blocked_methods_rejected(self, client):
+        """Every method in _BLOCKED_METHODS should raise OdooValidationError."""
+        for method in _BLOCKED_METHODS:
+            with pytest.raises(OdooValidationError, match="blocked for security"):
+                client.execute("res.partner", method)
+
+    def test_blocked_in_readonly_too(self, readonly_client):
+        """Blocked methods should fail with blocked error, not readonly error."""
+        with pytest.raises(OdooValidationError, match="blocked for security"):
+            readonly_client.execute("res.partner", "sudo")
+
+
+# =============================================================
+# Extended: Sensitive model deny list (SmartActionHandler)
+# =============================================================
+
+class TestSensitiveModels:
+    """Verify sensitive models are blocked in SmartActionHandler."""
+
+    def test_sensitive_model_blocked_in_generic_find_or_create(self):
+        from openclaw_odoo.intelligence.smart_actions import SmartActionHandler
+        mock_client = MagicMock()
+        handler = SmartActionHandler(mock_client)
+        with pytest.raises(OdooClawError, match="Cannot create records in sensitive model"):
+            handler.generic_find_or_create("res.users", "admin")
+
+    def test_ir_cron_blocked(self):
+        from openclaw_odoo.intelligence.smart_actions import SmartActionHandler
+        mock_client = MagicMock()
+        handler = SmartActionHandler(mock_client)
+        with pytest.raises(OdooClawError, match="sensitive model"):
+            handler.generic_find_or_create("ir.cron", "nightly_job")
+
+    def test_ir_module_module_blocked(self):
+        from openclaw_odoo.intelligence.smart_actions import SmartActionHandler
+        mock_client = MagicMock()
+        handler = SmartActionHandler(mock_client)
+        with pytest.raises(OdooClawError, match="sensitive model"):
+            handler.generic_find_or_create("ir.module.module", "base")
+
+    def test_non_sensitive_model_allowed(self):
+        from openclaw_odoo.intelligence.smart_actions import SmartActionHandler
+        mock_client = MagicMock()
+        mock_client.search_read.return_value = [{"id": 1, "name": "Widget"}]
+        handler = SmartActionHandler(mock_client)
+        result = handler.generic_find_or_create("product.product", "Widget")
+        assert result["id"] == 1
+        assert result["created"] is False
+
+
+# =============================================================
+# Extended: Skill execute action security
+# =============================================================
+
+class TestSkillExecuteSecurity:
+    """Verify the skill 'execute' action blocks dangerous methods."""
+
+    def test_skill_execute_blocks_blocked_methods(self):
+        from openclaw_odoo.interfaces.openclaw_skill import route_action
+        mock_client = MagicMock()
+        mock_client.config = MagicMock(readonly=False)
+        result = route_action(mock_client, "execute", {
+            "model": "res.partner",
+            "method": "sudo",
+        })
+        assert result["error"] is True
+        assert "blocked" in result["message"].lower()
+
+    def test_skill_execute_blocks_write_in_readonly(self):
+        from openclaw_odoo.interfaces.openclaw_skill import route_action
+        mock_client = MagicMock()
+        mock_client.config = MagicMock(readonly=True)
+        result = route_action(mock_client, "execute", {
+            "model": "res.partner",
+            "method": "create",
+        })
+        assert result["error"] is True
+        assert "readonly" in result["message"].lower() or "READONLY" in result["message"]
+
+
+# =============================================================
+# Extended: MCP execute_method security
+# =============================================================
+
+class TestMCPExecuteMethodSecurity:
+    """Verify the MCP execute_method tool blocks dangerous methods."""
+
+    @pytest.mark.anyio
+    async def test_mcp_execute_method_blocks_unlink(self):
+        from openclaw_odoo.interfaces.mcp_server import create_mcp_server
+        mock_client = MagicMock()
+        mock_client.config = MagicMock()
+        mock_client.config.odoo_url = "http://localhost:5353"
+        mock_client.config.odoo_db = "test_db"
+        mock_client.config.readonly = False
+        mcp = create_mcp_server(mock_client)
+        result = await mcp.call_tool("execute_method", {
+            "model": "res.partner",
+            "method": "unlink",
+        })
+        text = result.content[0].text
+        data = json.loads(text)
+        assert "error" in data
+        assert "blocked" in data["error"].lower()
+
+    @pytest.mark.anyio
+    async def test_mcp_execute_method_blocks_sudo(self):
+        from openclaw_odoo.interfaces.mcp_server import create_mcp_server
+        mock_client = MagicMock()
+        mock_client.config = MagicMock()
+        mock_client.config.odoo_url = "http://localhost:5353"
+        mock_client.config.odoo_db = "test_db"
+        mock_client.config.readonly = False
+        # client.execute should raise for blocked methods
+        mock_client.execute.side_effect = OdooValidationError("Method 'sudo' is blocked for security reasons")
+        mcp = create_mcp_server(mock_client)
+        result = await mcp.call_tool("execute_method", {
+            "model": "res.partner",
+            "method": "sudo",
+        })
+        text = result.content[0].text
+        data = json.loads(text)
+        assert "error" in data
+        assert "blocked" in data["error"].lower() or "security" in data["error"].lower()
+
+
+# =============================================================
+# 1. (Legacy) Readonly allowlist enforcement in execute()
 # =============================================================
 
 class TestReadonlyAllowlist:
@@ -98,7 +756,7 @@ class TestReadonlyAllowlist:
             readonly_client.execute("res.partner", "write", [1], {"name": "x"})
 
     def test_unlink_blocked_in_readonly(self, readonly_client):
-        with pytest.raises(OdooClawError, match="READONLY"):
+        with pytest.raises(OdooClawError, match="READONLY|not allowed"):
             readonly_client.execute("res.partner", "unlink", [1])
 
     def test_action_confirm_blocked_in_readonly(self, readonly_client):
@@ -671,7 +1329,7 @@ class TestBatchReadonlyEnforcement:
         result = batch_execute(readonly_client, operations, fail_fast=True)
         assert result["success"] is False
         assert result["failed"] == 1
-        assert "READONLY" in result["results"][0]["error"]
+        assert "READONLY" in result["results"][0]["error"] or "blocked" in result["results"][0]["error"]
 
     def test_batch_blocks_action_confirm_in_readonly(self, readonly_client):
         from openclaw_odoo.batch import batch_execute

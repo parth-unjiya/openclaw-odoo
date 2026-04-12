@@ -74,6 +74,19 @@ def create_mcp_server(client: OdooClient) -> FastMCP:
             return _json({"error": _sanitize_error(str(e))})
 
     @mcp.tool()
+    def count_records(
+        model: str,
+        domain: list | None = None,
+    ) -> str:
+        """Count records matching a domain filter. Returns an integer count."""
+        try:
+            count = client.search_count(model, domain=domain or [])
+            return _json({"model": model, "count": count})
+        except Exception as e:
+            logger.exception("MCP tool count_records failed")
+            return _json({"error": _sanitize_error(str(e))})
+
+    @mcp.tool()
     def create_record(model: str, values: dict) -> str:
         """Create a new record in the given Odoo model."""
         try:
@@ -118,8 +131,10 @@ def create_mcp_server(client: OdooClient) -> FastMCP:
     ) -> str:
         """Execute an arbitrary method on an Odoo model."""
         try:
-            if method in _BLOCKED_METHODS:
-                return _json({"error": f"Method '{method}' is blocked for safety reasons"})
+            # Block dangerous methods at the MCP interface level
+            _MCP_EXTRA_BLOCKED = {"unlink"}  # use delete_record tool instead
+            if method in _BLOCKED_METHODS or method in _MCP_EXTRA_BLOCKED:
+                return _json({"error": f"Method '{method}' is blocked for safety reasons. Use the appropriate tool instead."})
             if client.config.readonly and method in _WRITE_METHODS:
                 return _json({"error": f"Method '{method}' is not allowed in readonly mode"})
             result = client.execute(model, method, *(args or []), **(kwargs or {}))
@@ -168,7 +183,7 @@ def create_mcp_server(client: OdooClient) -> FastMCP:
         try:
             params = params or {}
             dashboards = {
-                "sales": lambda: SalesAnalytics(client).dashboard(),
+                "sales": lambda: SalesAnalytics(client).dashboard(**params),
                 "financial": lambda: FinancialAnalytics(client).dashboard(),
                 "inventory": lambda: InventoryAnalytics(client).dashboard(),
                 "hr": lambda: HRAnalytics(client).dashboard(),

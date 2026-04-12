@@ -44,18 +44,18 @@ def mcp(mock_client):
 
 class TestToolRegistration:
     @pytest.mark.anyio
-    async def test_has_12_tools(self, mcp):
+    async def test_has_13_tools(self, mcp):
         tools = await mcp.list_tools()
-        assert len(tools) == 12
+        assert len(tools) == 13
 
     @pytest.mark.anyio
     async def test_tool_names(self, mcp):
         tools = await mcp.list_tools()
         names = {t.name for t in tools}
         expected = {
-            "search_records", "create_record", "update_record", "delete_record",
-            "execute_method", "batch_execute", "smart_action", "analyze",
-            "import_file", "export_data", "list_models", "get_fields",
+            "search_records", "count_records", "create_record", "update_record",
+            "delete_record", "execute_method", "batch_execute", "smart_action",
+            "analyze", "import_file", "export_data", "list_models", "get_fields",
         }
         assert names == expected
 

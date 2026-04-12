@@ -253,8 +253,8 @@ class TestSalesAnalytics:
             assert len(result["trend"]) == 2
             assert result["top_products"][0]["product_name"] == "Widget"
             mock_sales.analyze_sales.assert_called_once_with(client)
-            mock_sales.get_sales_trend.assert_called_once_with(client)
-            mock_sales.get_top_products.assert_called_once_with(client)
+            mock_sales.get_sales_trend.assert_called_once_with(client, months=6)
+            mock_sales.get_top_products.assert_called_once_with(client, limit=10)
 
     def test_compare_periods(self, client):
         with patch("openclaw_odoo.intelligence.analytics.sales") as mock_sales:

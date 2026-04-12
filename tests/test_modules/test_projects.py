@@ -266,6 +266,20 @@ class TestCreateTicket:
         assert result["id"] == 30
         assert result.get("fallback") is True
 
+    def test_fallback_on_generic_odoo_claw_error(self, client):
+        """When helpdesk.ticket model doesn't exist, Odoo raises OdooClawError
+        (not OdooAccessError). The fallback must still trigger."""
+        from openclaw_odoo.errors import OdooClawError
+        client.create.side_effect = [
+            OdooClawError("Object helpdesk.ticket doesn't exist"),
+            31,  # fallback project.task create
+        ]
+        result = create_ticket(client, "Missing model ticket", project_id=5)
+        second_call = client.create.call_args_list[1]
+        assert second_call[0][0] == "project.task"
+        assert result["id"] == 31
+        assert result.get("fallback") is True
+
 
 # ---- get_tickets ----
 

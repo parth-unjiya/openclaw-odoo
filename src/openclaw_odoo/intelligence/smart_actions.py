@@ -44,7 +44,18 @@ class SmartActionHandler:
             ilike_domain = or_clauses
 
         results = self.client.search_read(model, domain=ilike_domain, fields=fields, limit=1)
-        return results[0] if results else None
+        if results:
+            return results[0]
+
+        # Word-level match: each word must appear in name_field (handles reordering)
+        words = query.strip().split()
+        if len(words) > 1:
+            word_domain = [[name_field, "ilike", w] for w in words]
+            results = self.client.search_read(model, domain=word_domain, fields=fields, limit=1)
+            if results:
+                return results[0]
+
+        return None
 
     # =============================================================
     # generic find_or_create (registry-driven)
@@ -233,7 +244,10 @@ class SmartActionHandler:
                 "quantity": line.get("quantity", 1),
                 "price_unit": line.get("price_unit", 0),
             }
-            if "product_id" in line:
+            if "product" in line:
+                product_result = self.find_or_create_product(line["product"])
+                vals["product_id"] = product_result["id"]
+            elif "product_id" in line:
                 vals["product_id"] = line["product_id"]
             if "name" in line:
                 vals["name"] = line["name"]

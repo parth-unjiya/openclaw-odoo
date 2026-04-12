@@ -34,6 +34,8 @@ class OdooClawConfig:
     smart_fields_limit: int = 15
     # Behavior
     readonly: bool = False
+    # Protocol: "auto" (detect based on version + creds), "json2", or "jsonrpc"
+    protocol: str = "auto"
     # Alerts
     alerts_enabled: bool = False
     poll_interval: int = 30
@@ -78,6 +80,7 @@ def load_config(config_path: Optional[str] = None) -> OdooClawConfig:
             config.max_limit = limits.get("max", config.max_limit)
             config.smart_fields_limit = limits.get("smart_fields", config.smart_fields_limit)
             config.readonly = data.get("readonly", config.readonly)
+            config.protocol = data.get("protocol", config.protocol)
             config.alerts_enabled = alerts.get("enabled", config.alerts_enabled)
             config.poll_interval = alerts.get("poll_interval", config.poll_interval)
             # TODO: parse alert_destinations and alert_thresholds from config file

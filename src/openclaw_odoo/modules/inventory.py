@@ -150,6 +150,8 @@ def get_low_stock(client: OdooClient, threshold: int = 10) -> list[dict]:
     return client.search_read(
         "product.product",
         domain=[["qty_available", "<", threshold]],
+        fields=["id", "name", "default_code", "qty_available",
+                "virtual_available", "standard_price", "categ_id"],
     )
 
 

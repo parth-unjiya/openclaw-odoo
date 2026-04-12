@@ -234,6 +234,8 @@ class TestRequestLeave:
         client.create.assert_called_once_with("hr.leave", {
             "employee_id": 1,
             "holiday_status_id": 2,
+            "request_date_from": "2026-03-10",
+            "request_date_to": "2026-03-12",
             "date_from": "2026-03-10 08:00:00",
             "date_to": "2026-03-12 17:00:00",
         })
